@@ -9,11 +9,16 @@
 const http = require('http');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 const { buildSchema, graphql } = require('graphql');
 
 const PORT = 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'destinations.json');
 const REGION_FILE = path.join(__dirname, 'data', 'regions.json');
+const KEY_FILE = path.join(__dirname, 'data', 'api-keys.json');
+const USER_FILE = path.join(__dirname, 'data', 'users.json');
+const TOKEN_SECRET = 'ganti-dengan-kalimat-rahasia-milik-anda-sendiri';
+const MASA_TOKEN = 3600;
 
 // -----------------------------------------------------------------------------
 // HELPER RESPONS (Kode 3.4)
@@ -73,6 +78,92 @@ function bacaBody(req) {
         });
         req.on('error', reject);
     });
+}
+
+// ---------- keamanan ----------
+async function periksaApiKey(req) {
+    const kunci = req.headers['x-api-key'];
+    if (!kunci) {
+        throw buatError(401, 'API key tidak disertakan. Kirim melalui header x-api-key');
+    }
+    const isi = await fs.readFile(KEY_FILE, 'utf8');
+    const pemilik = JSON.parse(isi).find((k) => k.key === kunci);
+    if (!pemilik) {
+        throw buatError(401, 'API key tidak dikenal');
+    }
+    return pemilik;
+}
+
+function samaAman(a, b) {
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+function passwordCocok(password, user) {
+    const hash = crypto.scryptSync(password, user.salt, 32).toString('hex');
+    return samaAman(hash, user.passwordHash);
+}
+
+function keBase64Url(data) {
+    return Buffer.from(JSON.stringify(data)).toString('base64url');
+}
+
+function tandaTangan(teks) {
+    return crypto.createHmac('sha256', TOKEN_SECRET).update(teks).digest('base64url');
+}
+
+function buatToken(user) {
+    const header = keBase64Url({ alg: 'HS256', typ: 'JWT' });
+    const payload = keBase64Url({
+        sub: String(user.id),
+        username: user.username,
+        role: user.role,
+        exp: Math.floor(Date.now() / 1000) + MASA_TOKEN
+    });
+    const ttd = tandaTangan(`${header}.${payload}`);
+    return `${header}.${payload}.${ttd}`;
+}
+
+function bacaToken(token) {
+    const bagian = token.split('.');
+    if (bagian.length !== 3) {
+        throw buatError(401, 'Format token tidak valid');
+    }
+
+    const [header, payload, ttd] = bagian;
+    if (!samaAman(ttd, tandaTangan(`${header}.${payload}`))) {
+        throw buatError(401, 'Tanda tangan token tidak cocok');
+    }
+
+    const isi = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (isi.exp < Math.floor(Date.now() / 1000)) {
+        throw buatError(401, 'Token sudah kedaluwarsa, silakan login kembali');
+    }
+    return isi;
+}
+
+function bacaPengguna(req) {
+    const nilai = req.headers['authorization'];
+    if (!nilai || !nilai.startsWith('Bearer ')) {
+        return null;
+    }
+    return bacaToken(nilai.slice(7));
+}
+
+function wajibLogin(pengguna) {
+    if (!pengguna) {
+        throw buatError(401, 'Anda belum login. Kirim token melalui header Authorization');
+    }
+    return pengguna;
+}
+
+function wajibRole(pengguna, roleYangBoleh) {
+    wajibLogin(pengguna);
+    if (!roleYangBoleh.includes(pengguna.role)) {
+        throw buatError(403, `Role ${pengguna.role} tidak berhak melakukan tindakan ini`);
+    }
+    return pengguna;
 }
 
 // ---------- logika destinasi ----------
@@ -182,6 +273,33 @@ async function tanganiRegions(req, res, segmen) {
     kirimJSON(res, 200, item);
 }
 
+async function tanganiLogin(req, res) {
+    if (req.method !== 'POST') {
+        res.setHeader('Allow', 'POST');
+        return kirimError(res, 405, 'Endpoint /login hanya menerima method POST');
+    }
+
+    const input = await bacaBody(req);
+    const lengkap = input !== null
+        && typeof input.username === 'string'
+        && typeof input.password === 'string';
+    if (!lengkap) {
+        return kirimError(res, 400, 'Body harus memuat username dan password');
+    }
+
+    const isi = await fs.readFile(USER_FILE, 'utf8');
+    const user = JSON.parse(isi).find((u) => u.username === input.username);
+    if (!user || !passwordCocok(input.password, user)) {
+        return kirimError(res, 401, 'Username atau password salah');
+    }
+
+    kirimJSON(res, 200, {
+        token: buatToken(user),
+        tokenType: 'Bearer',
+        expiresIn: MASA_TOKEN
+    });
+}
+
 // ---------- graphql: schema ----------
 const schema = buildSchema(`
     type Destination {
@@ -266,7 +384,8 @@ resolver.destination = async (args) => {
     return lengkapiDestinasi(item);
 };
 
-resolver.createDestination = async (args) => {
+resolver.createDestination = async (args, context) => {
+    wajibLogin(context.pengguna);
     const item = await buatDestinasi(args);
     return lengkapiDestinasi(item);
 };
@@ -277,14 +396,18 @@ async function tanganiGraphQL(req, res) {
         res.setHeader('Allow', 'POST');
         return kirimError(res, 405, 'Endpoint /graphql hanya menerima method POST');
     }
+
+    const pengguna = bacaPengguna(req);
     const body = await bacaBody(req);
     if (body === null || typeof body.query !== 'string') {
         return kirimError(res, 400, 'Body harus berupa JSON yang memiliki field query');
     }
+
     const hasil = await graphql({
         schema: schema,
         source: body.query,
-        rootValue: resolver
+        rootValue: resolver,
+        contextValue: { pengguna: pengguna }
     });
     kirimJSON(res, 200, hasil);
 }
@@ -292,9 +415,17 @@ async function tanganiGraphQL(req, res) {
 // -----------------------------------------------------------------------------
 // ROUTER & KERANGKA SERVER (Kode 3.7)
 // -----------------------------------------------------------------------------
+// ---------- router ----------
 async function router(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const segmen = url.pathname.split('/').filter(Boolean);
+
+    const aplikasi = await periksaApiKey(req);
+    console.log(` aplikasi: ${aplikasi.client}`);
+
+    if (segmen[0] === 'login' && segmen.length === 1) {
+        return tanganiLogin(req, res);
+    }
 
     if (segmen[0] === 'graphql' && segmen.length === 1) {
         return tanganiGraphQL(req, res);
@@ -311,7 +442,10 @@ async function router(req, res) {
     // Endpoint koleksi: /destinations
     if (segmen.length === 1) {
         if (req.method === 'GET') return daftarDestinasi(req, res, url);
-        if (req.method === 'POST') return tambahDestinasi(req, res);
+        if (req.method === 'POST') {
+            wajibLogin(bacaPengguna(req));
+            return tambahDestinasi(req, res);
+        }
         res.setHeader('Allow', 'GET, POST');
         return kirimError(res, 405, `Method ${req.method} tidak didukung pada endpoint ini`);
     }
@@ -323,8 +457,14 @@ async function router(req, res) {
     }
 
     if (req.method === 'GET') return detailDestinasi(req, res, id);
-    if (req.method === 'PUT') return ubahDestinasi(req, res, id);
-    if (req.method === 'DELETE') return hapusDestinasi(req, res, id);
+    if (req.method === 'PUT') {
+        wajibLogin(bacaPengguna(req));
+        return ubahDestinasi(req, res, id);
+    }
+    if (req.method === 'DELETE') {
+        wajibRole(bacaPengguna(req), ['admin']);
+        return hapusDestinasi(req, res, id);
+    }
     res.setHeader('Allow', 'GET, PUT, DELETE');
     return kirimError(res, 405, `Method ${req.method} tidak didukung pada endpoint ini`);
 }
