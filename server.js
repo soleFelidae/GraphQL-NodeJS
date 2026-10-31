@@ -20,6 +20,10 @@ const USER_FILE = path.join(__dirname, 'data', 'users.json');
 const TOKEN_SECRET = 'ganti-dengan-kalimat-rahasia-milik-anda-sendiri';
 const MASA_TOKEN = 3600;
 
+// Eksperimen 3: Penyimpanan percobaan login gagal (in-memory variable)
+// username -> { count: number, lockedUntil: number }
+const batasPercobaanLogin = new Map();
+
 // -----------------------------------------------------------------------------
 // HELPER RESPONS (Kode 3.4)
 // -----------------------------------------------------------------------------
@@ -287,16 +291,63 @@ async function tanganiLogin(req, res) {
         return kirimError(res, 400, 'Body harus memuat username dan password');
     }
 
+    const sekarang = Date.now();
+    const catatan = batasPercobaanLogin.get(input.username);
+
+    // Eksperimen 3: Tolak percobaan login selama 60 detik jika sudah gagal 3 kali berturut-turut
+    if (catatan && catatan.lockedUntil && sekarang < catatan.lockedUntil) {
+        const sisaDetik = Math.ceil((catatan.lockedUntil - sekarang) / 1000);
+        res.setHeader('Retry-After', sisaDetik);
+        return kirimError(
+            res,
+            429,
+            `Terlalu banyak percobaan login gagal untuk username '${input.username}'. Percobaan login ditolak, silakan coba lagi dalam ${sisaDetik} detik`
+        );
+    }
+
+    // Jika masa hukuman telah selesai, hapus catatan kunci
+    if (catatan && catatan.lockedUntil && sekarang >= catatan.lockedUntil) {
+        batasPercobaanLogin.delete(input.username);
+    }
+
     const isi = await fs.readFile(USER_FILE, 'utf8');
     const user = JSON.parse(isi).find((u) => u.username === input.username);
     if (!user || !passwordCocok(input.password, user)) {
+        const dataLogin = batasPercobaanLogin.get(input.username) || { count: 0, lockedUntil: 0 };
+        dataLogin.count += 1;
+        if (dataLogin.count >= 3) {
+            dataLogin.lockedUntil = sekarang + 60000; // Kunci selama 60 detik
+        }
+        batasPercobaanLogin.set(input.username, dataLogin);
         return kirimError(res, 401, 'Username atau password salah');
     }
+
+    // Login berhasil: reset catatan kegagalan untuk username ini
+    batasPercobaanLogin.delete(input.username);
 
     kirimJSON(res, 200, {
         token: buatToken(user),
         tokenType: 'Bearer',
         expiresIn: MASA_TOKEN
+    });
+}
+
+// Eksperimen 2: Endpoint profil GET /me
+async function tanganiMe(req, res) {
+    if (req.method !== 'GET') {
+        res.setHeader('Allow', 'GET');
+        return kirimError(res, 405, `Method ${req.method} tidak didukung pada endpoint ini`);
+    }
+
+    const pengguna = wajibLogin(bacaPengguna(req));
+    const sisaWaktu = Math.max(0, pengguna.exp - Math.floor(Date.now() / 1000));
+
+    kirimJSON(res, 200, {
+        id: Number(pengguna.sub) || pengguna.sub,
+        username: pengguna.username,
+        role: pengguna.role,
+        sisaWaktu: sisaWaktu,
+        expiresIn: sisaWaktu
     });
 }
 
@@ -328,6 +379,13 @@ const schema = buildSchema(`
             category: String!
             regionId: ID!
         ): Destination
+        updateDestination(
+            id: ID!
+            name: String
+            category: String
+            regionId: ID
+        ): Destination
+        deleteDestination(id: ID!): Boolean
     }
 `);
 
@@ -384,10 +442,40 @@ resolver.destination = async (args) => {
     return lengkapiDestinasi(item);
 };
 
+// Eksperimen 1 & 4: createDestination menolak viewer, hanya menerima admin dan editor
 resolver.createDestination = async (args, context) => {
-    wajibLogin(context.pengguna);
+    wajibRole(context.pengguna, ['admin', 'editor']);
     const item = await buatDestinasi(args);
     return lengkapiDestinasi(item);
+};
+
+// Eksperimen 4: updateDestination menuntut login dan menolak viewer (hanya admin & editor)
+resolver.updateDestination = async (args, context) => {
+    wajibRole(context.pengguna, ['admin', 'editor']);
+    const id = Number(args.id);
+    const data = await bacaData();
+    const index = data.findIndex((d) => d.id === id);
+    if (index === -1) {
+        throw new Error(`Destinasi dengan id ${id} tidak ditemukan`);
+    }
+    const bersih = await periksaDestinasi(args);
+    data[index] = { id: id, ...bersih };
+    await simpanData(data);
+    return lengkapiDestinasi(data[index]);
+};
+
+// Eksperimen 4: deleteDestination menuntut login dan hanya untuk admin
+resolver.deleteDestination = async (args, context) => {
+    wajibRole(context.pengguna, ['admin']);
+    const id = Number(args.id);
+    const data = await bacaData();
+    const index = data.findIndex((d) => d.id === id);
+    if (index === -1) {
+        throw new Error(`Destinasi dengan id ${id} tidak ditemukan`);
+    }
+    data.splice(index, 1);
+    await simpanData(data);
+    return true;
 };
 
 // ---------- graphql: handler ----------
@@ -427,6 +515,11 @@ async function router(req, res) {
         return tanganiLogin(req, res);
     }
 
+    // Eksperimen 2: Endpoint profil
+    if (segmen[0] === 'me' && segmen.length === 1) {
+        return tanganiMe(req, res);
+    }
+
     if (segmen[0] === 'graphql' && segmen.length === 1) {
         return tanganiGraphQL(req, res);
     }
@@ -442,8 +535,9 @@ async function router(req, res) {
     // Endpoint koleksi: /destinations
     if (segmen.length === 1) {
         if (req.method === 'GET') return daftarDestinasi(req, res, url);
+        // Eksperimen 1: POST menolak viewer, hanya menerima admin dan editor
         if (req.method === 'POST') {
-            wajibLogin(bacaPengguna(req));
+            wajibRole(bacaPengguna(req), ['admin', 'editor']);
             return tambahDestinasi(req, res);
         }
         res.setHeader('Allow', 'GET, POST');
@@ -457,10 +551,12 @@ async function router(req, res) {
     }
 
     if (req.method === 'GET') return detailDestinasi(req, res, id);
+    // Eksperimen 1: PUT menolak viewer, hanya menerima admin dan editor
     if (req.method === 'PUT') {
-        wajibLogin(bacaPengguna(req));
+        wajibRole(bacaPengguna(req), ['admin', 'editor']);
         return ubahDestinasi(req, res, id);
     }
+    // DELETE hanya boleh untuk admin
     if (req.method === 'DELETE') {
         wajibRole(bacaPengguna(req), ['admin']);
         return hapusDestinasi(req, res, id);

@@ -3,11 +3,11 @@ const fs = require('fs');
 const path = require('path');
 
 const USER_FILE = path.join(__dirname, 'data', 'users.json');
-const ROLE_SAH = ['admin', 'editor'];
+const ROLE_SAH = ['admin', 'editor', 'viewer'];
 const [username, password, role] = process.argv.slice(2);
 
 if (!username || !password || !ROLE_SAH.includes(role)) {
-    console.log('Cara pakai: node buat-user.js <username> <password> <admin|editor>');
+    console.log('Cara pakai: node buat-user.js <username> <password> <admin|editor|viewer>');
     process.exit(1);
 }
 

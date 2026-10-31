@@ -19,5 +19,33 @@
     "role": "editor",
     "salt": "6601bb1fa0fd26345dd0b192f70fb005",
     "passwordHash": "338ae223ce389d9380adf5cddfde2d15d3104b1468c334c5ce179ecba36e3b75"
+  },
+  {
+    "id": 4,
+    "username": "alif",
+    "role": "viewer",
+    "salt": "d5ac21ed5c1ae94da287a43d758bce5e",
+    "passwordHash": "b3b94f7c9e5d98af1e6ea33b212662a35a3fb873571a8083fbbf6047d4edcfa1"
+  },
+  {
+    "id": 5,
+    "username": "fadil",
+    "role": "viewer",
+    "salt": "0fef85cbae47987fc768db2e9ee86b7f",
+    "passwordHash": "48f07e74f1ea270a077816a8efdf05165f3533fedcd9f2c9241b2ca6b9ef2780"
+  },
+  {
+    "id": 6,
+    "username": "penonton",
+    "role": "viewer",
+    "salt": "7927a8e70ad2588f20044203907528a4",
+    "passwordHash": "c93df8d12a661f3c34a48a742b037bd584caa3200c5ea23a33bf7e8ebcc5ee48"
+  },
+  {
+    "id": 7,
+    "username": "f55124038",
+    "role": "editor",
+    "salt": "5d4f3bd59e1060c4b3a80d211c20eac5",
+    "passwordHash": "bceb5f35353e71b5f0520cd29e202ce3bbd43cdedbe4f5f9cad1e1f7bf582a8c"
   }
 ]
