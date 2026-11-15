@@ -93,7 +93,7 @@ async function periksaApiKey(req) {
     const isi = await fs.readFile(KEY_FILE, 'utf8');
     const pemilik = JSON.parse(isi).find((k) => k.key === kunci);
     if (!pemilik) {
-        throw buatError(401, 'API key tidak dikenal');
+        throw buatError(401, 'API key tidak dikenal wlee');
     }
     return pemilik;
 }
