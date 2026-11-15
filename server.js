@@ -79,7 +79,7 @@ function bacaBody(req) {
             } catch (err) {
                 reject(buatError(400, 'Body request bukan JSON yang valid'));
             }
-        }
+        })
         req.on('error', reject);
     });
 }
